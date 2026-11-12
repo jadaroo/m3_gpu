@@ -160,7 +160,7 @@ those bits change; the bundle's value keeps the rest.
 | 3D | 0x15301 | `isp_bgobjdepth` | [HW] |
 | 3D | 0x15309 | `isp_bgobjvals` | [HW] |
 | 3D | 0x15211 | `height << 32 \| width` | [HW] |
-| 3D | 0x15321 | `isp_zls_pixels` (0 without depth) | [HW] |
+| 3D | 0x15321 | `isp_zls_pixels` (`width - 1`, `height - 1`; 0 without depth) | [HW] |
 | 3D | 0x15329 / 0x15331 | `depth.base` (Z load and store base; 0 without depth) | [HW] |
 | 3D | 0x15371 / 0x15369 | Background: `0x100_0000_0000 \| bg.usc`, `bg.rsrc_spec` | [HW] |
 | 3D | 0x15381 / 0x15379 | End-of-tile: `0x100_0000_0000 \| eot.usc`, `eot.rsrc_spec` | [HW] |
@@ -248,8 +248,8 @@ captured size apart from address bits [NATIVE].
 | Fact | Tag |
 |---|---|
 | Format: Z32F (GL's DEPTH24 formats qualify, since AGX stores them as Z32F) or Z16 (ZLS control Z format bits 25-26 = 2; depth bytes equal llvmpipe's) | [HW] |
-| Layout: GPU-tiled, uncompressed, single level; 64x64 pixels per 16 KiB page for Z32F (sides >= 64), 128x64 for Z16 (width >= 128). Smaller targets use another layout and are refused | [HW] |
-| The depth image (`ceil(w/64) * ceil(h/64) * 16 KiB`) must lie inside one of the command's attachments. `depth.base` must be 128-byte aligned, and nonzero exactly when `isp_zls_pixels` is | [HW] |
+| Layout: GPU-tiled, uncompressed, single level; 64x64 pixels per 16 KiB page for Z32F, 128x64 for Z16. ZLS addresses smaller targets in the same page layout, so Mesa lays out a single-level buffer narrower or shorter than a page as at least one page in each direction (ail alone would pack it more tightly), and the kernel counts at least one page per direction. Exact from 1x1 to 1920x1080, including 1x64, 64x1, 1x1024, 32x1024 and 1024x32 (depth rejected and passed, and kept across a readback) | [HW] |
+| The depth image (`ceil(w/64) * ceil(h/64) * 16 KiB`) must lie inside one of the command's attachments. `depth.base` must be 128-byte aligned. `isp_zls_pixels` packs `width - 1` and `height - 1`, so it must be 0 without a depth or stencil buffer, and 0 is also the 1x1 value with one | [HW] |
 | Registers: 0x15321 = `isp_zls_pixels`; 0x15329 and 0x15331 = `depth.base`. Mirrors: +0x938 (ZLS control), +0x948, +0x960, +0x968 (Z bases), +0xa50 (ZLS pixels) | [HW] |
 | ZLS control: 0x80000 for store only, 0x88000 for load and store (Mesa's existing packing gives both) | [HW] |
 | Depth clear uses the ZLS background (`isp_bgobjdepth` = `fui(depth)`, `isp_bgobjvals` = `0x300 \| stencil`) | [HW] |

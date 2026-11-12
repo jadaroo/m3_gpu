@@ -10,6 +10,12 @@
 //   flatint     flat integer varyings
 //   size W H    RGBA8 GPU-tiled texture target of any size, narrow ones too
 //   r8 W H      R8 GPU-tiled texture target (WebRender's clip masks)
+//   depth W H   RGBA8 + DEPTH24 of the same size: a red quad on the lower-left
+//               quarter at depth 0.5, then green over everything at 0.7 with
+//               GL_LESS (sides >= 2: the quarter must cover a pixel centre)
+//   depthfull W H  the same with full-coverage quads (any size, 1x1 too): red
+//               0.5, green 0.7 (rejected), then blue 0.3 (drawn) after a
+//               readback, so depth is stored and reloaded
 // Prints one G15_* PASS/FAIL line; exits 0 on PASS. With
 // G15_TEST_DRIVER=software it runs on llvmpipe (reference).
 #include <EGL/egl.h>
@@ -52,6 +58,9 @@ static const char *fs_flatint =
 static const char *vs_full =
     "#version 300 es\nlayout(location=0) in vec2 corner;\nuniform vec4 col;\n"
     "out vec4 c;\nvoid main(){ c = col; gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0); }\n";
+static const char *vs_depth =
+    "#version 300 es\nlayout(location=0) in vec2 corner;\nuniform vec4 col;\nuniform vec3 box;\n"
+    "out vec4 c;\nvoid main(){ c = col; gl_Position = vec4(corner * box.xy * 2.0 - 1.0, box.z, 1.0); }\n";
 static const char *fs =
     "#version 300 es\nprecision mediump float;\nin vec4 c;\nout vec4 o;\nvoid main(){ o = c; }\n";
 
@@ -101,6 +110,56 @@ int main(int argc, char **argv) {
     if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) { fprintf(stderr, "no GLES3 context\n"); return 2; }
     fprintf(stderr, "GL %s / %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
 
+    /* depthfull W H: full-coverage quads, so it also checks 1-pixel sizes. Red at
+     * depth 0.5, green at 0.7 (must fail GL_LESS), blue at 0.3 (must pass): blue. */
+    int full = !strcmp(mode, "depthfull");
+    if (!strcmp(mode, "depth") || full) {
+        /* RGBA8 colour + 24-bit depth (as WebRender), same size. Clear depth 1.0;
+         * red quad over the lower-left part at z=0.0 (depth 0.5); then a full green
+         * quad at z=0.4 (depth 0.7) with GL_LESS: red stays where it was drawn. */
+        int w = argc > 2 ? atoi(argv[2]) : 32, h = argc > 3 ? atoi(argv[3]) : 1024;
+        GLuint tex, db, f; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, w, h);
+        glGenRenderbuffers(1, &db); glBindRenderbuffer(GL_RENDERBUFFER, db);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+        glGenFramebuffers(1, &f); glBindFramebuffer(GL_FRAMEBUFFER, f);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, db);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { printf("G15_DEPTH %dx%d fbo-incomplete\n", w, h); return 2; }
+        glViewport(0, 0, w, h); glClearColor(0, 0, 0, 1); glClearDepthf(1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+        static const float q[] = {0, 0, 1, 0, 0, 1, 1, 1};
+        GLuint vao2, b2; glGenVertexArrays(1, &vao2); glBindVertexArray(vao2); glGenBuffers(1, &b2);
+        glBindBuffer(GL_ARRAY_BUFFER, b2); glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+        GLuint p = prog(vs_depth); glUseProgram(p);
+        GLint lc = glGetUniformLocation(p, "col"), lb = glGetUniformLocation(p, "box");
+        if (full) {
+            unsigned char px[3][4]; int ok = 1;
+            glUniform4f(lc, 1, 0, 0, 1); glUniform3f(lb, 1.0f, 1.0f, 0.0f); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glUniform4f(lc, 0, 1, 0, 1); glUniform3f(lb, 1.0f, 1.0f, 0.4f); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[0]);          /* red: green rejected */
+            glUniform4f(lc, 0, 0, 1, 1); glUniform3f(lb, 1.0f, 1.0f, -0.4f); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[1]);          /* blue: nearer passes */
+            glReadPixels(w - 1, h - 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[2]);  /* far corner blue too */
+            ok = px[0][0] == 255 && px[0][1] == 0 && px[1][2] == 255 && px[1][0] == 0 && px[2][2] == 255 && px[2][1] == 0;
+            printf("G15_DEPTHFULL %dx%d %s after-green=%d,%d,%d after-blue=%d,%d,%d corner=%d,%d,%d "
+                   "(want 255,0,0 / 0,0,255 / 0,0,255) glerror=0x%x\n", w, h, ok ? "PASS" : "FAIL",
+                   px[0][0], px[0][1], px[0][2], px[1][0], px[1][1], px[1][2], px[2][0], px[2][1], px[2][2], glGetError());
+            return ok ? 0 : 1;
+        }
+        glUniform4f(lc, 1, 0, 0, 1); glUniform3f(lb, 0.5f, 0.5f, 0.0f); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glUniform4f(lc, 0, 1, 0, 1); glUniform3f(lb, 1.0f, 1.0f, 0.4f); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glFinish();
+        unsigned char in[4], out[4];
+        glReadPixels(w / 4, h / 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, in);           /* inside red quad */
+        glReadPixels(3 * w / 4, 3 * h / 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);  /* outside */
+        int ok = in[0] == 255 && in[1] == 0 && out[0] == 0 && out[1] == 255;
+        printf("G15_DEPTH %dx%d %s inside=%d,%d outside=%d,%d (want 255,0 / 0,255) glerror=0x%x\n", w, h,
+               ok ? "PASS" : "FAIL", in[0], in[1], out[0], out[1], glGetError());
+        return ok ? 0 : 1;
+    }
     if (!strcmp(mode, "r8")) {
         /* R8 render target (GPU-tiled), as WebRender's clip masks: clear to 0.25,
          * then draw 0.5 over the left half. Expect ~64 on the right, ~128 on the left. */

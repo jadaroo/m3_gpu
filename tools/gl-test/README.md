@@ -16,7 +16,9 @@ line (PASS/FAIL) and exits nonzero on failure.
 
 Checks for the GL features Firefox's WebRender and niri/Smithay use:
 instanced draws (`noinst`, `instid`, `attrib`), flat varyings (`flat`,
-`flatint`), narrow render targets (`size W H`) and R8 targets (`r8 W H`).
+`flatint`), narrow render targets (`size W H`), R8 targets (`r8 W H`) and
+depth targets of any size (`depth W H`, `depthfull W H`; `depth` needs sides
+>= 2, `depthfull` covers every pixel and checks 1x1 too).
 Each mode renders offscreen and compares read-back pixels with the expected
 colours.
 
